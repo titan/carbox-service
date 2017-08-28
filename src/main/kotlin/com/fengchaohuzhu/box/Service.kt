@@ -42,44 +42,21 @@ private fun checkVersion(buf: ByteArray, offset: Int, len: Int): ByteArray {
 	val timestamp = getNowTime()
 	var sn: Int = 0
 	if(packet.type == CommandType.DATA){
-		val up_data: Data = packet.data
-		sn = up_data.sn
-		System.out.println(up_data.systemBoard)
-		System.out.println(up_data.lockBoard)
-		val tests: Boolean = jedis.sismember("testset", str_mac);
-		println(tests)
-		/* 查看是否在白名单中 */
-		if(tests == false){
-			val supervisor_url = jedis.hget("upgrade.release.supervisor", up_data.systemBoard.toString()  + "-" + up_data.lockBoard.toString())
-			if(supervisor_url != null){
-				var url = supervisor_url
-				val lastIndexOfDot: Int = url.lastIndexOf("/")
-				val fileNameLength: Int = url.length
-				val extension: String = url.substring(lastIndexOfDot+1, fileNameLength-4)
-				val arr = extension.split("-")
-				val systemBoard = arr[0].toInt()
-				val lockBoard = arr[1].toInt()
-				val version = arr[2].toInt()
-				val supervisorChecksum = arr[3].toLong()
-				if(up_data.supervisorVersion != version) {
-						var payload = Upgrade()
-						payload.sn = sn
-						payload.boxosVersion = up_data.boxosVersion
-						payload.systemBoard = systemBoard
-						payload.boxosUrl = null
-						payload.lockBoard = lockBoard 
-						payload.supervisorChecksum  = supervisorChecksum
-						payload.supervisorUrl  = url 
-						payload.supervisorVersion = version
-						payload.version = up_data.version
-						payload.timestamp = timestamp
-						val payload_byte: ByteArray = Packer.encode(mac, payload)
-						return payload_byte
-				}
-			}
-			val boxos_url = jedis.hget("upgrade.release.boxos", up_data.systemBoard.toString()  + "-" + up_data.lockBoard.toString())
-				if(boxos_url != null) {
-					var url = boxos_url 
+		try{
+			val up_data: Data = packet.data
+			sn = up_data.sn
+			System.out.println(up_data.systemBoard)
+			System.out.println(up_data.lockBoard)
+			System.out.println(up_data.supervisorVersion)
+			System.out.println(up_data.boxosVersion)
+			System.out.println(up_data.version)
+			val tests: Boolean = jedis.sismember("testset", str_mac);
+			println(tests)
+			/* 查看是否在白名单中 */
+			if(tests == false){
+				val supervisor_url = jedis.hget("upgrade.release.supervisor", up_data.systemBoard.toString()  + "-" + up_data.lockBoard.toString() + "-" + up_data.version.toString())
+				if(supervisor_url != null){
+					var url = supervisor_url
 					val lastIndexOfDot: Int = url.lastIndexOf("/")
 					val fileNameLength: Int = url.length
 					val extension: String = url.substring(lastIndexOfDot+1, fileNameLength-4)
@@ -87,8 +64,35 @@ private fun checkVersion(buf: ByteArray, offset: Int, len: Int): ByteArray {
 					val systemBoard = arr[0].toInt()
 					val lockBoard = arr[1].toInt()
 					val version = arr[2].toInt()
-					val boxosChecksum = arr[3].toLong()
-					if(up_data.boxosVersion != version) {
+					val supervisorChecksum = arr[3].toLong()
+					// if(up_data.supervisorVersion < version) {
+					var payload = Upgrade()
+					payload.sn = sn
+					payload.boxosVersion = up_data.boxosVersion
+					payload.systemBoard = systemBoard
+					payload.boxosUrl = null
+					payload.lockBoard = lockBoard 
+					payload.supervisorChecksum  = supervisorChecksum
+					payload.supervisorUrl  = url 
+					payload.supervisorVersion = version
+					payload.version = up_data.version
+					payload.timestamp = timestamp
+					val payload_byte: ByteArray = Packer.encode(mac, payload)
+					return payload_byte
+					// }
+				}
+				val boxos_url = jedis.hget("upgrade.release.boxos", up_data.systemBoard.toString()  + "-" + up_data.lockBoard.toString() + "-" + up_data.version.toString())
+					if(boxos_url != null) {
+						var url = boxos_url 
+						val lastIndexOfDot: Int = url.lastIndexOf("/")
+						val fileNameLength: Int = url.length
+						val extension: String = url.substring(lastIndexOfDot+1, fileNameLength-4)
+						val arr = extension.split("-")
+						val systemBoard = arr[0].toInt()
+						val lockBoard = arr[1].toInt()
+						val version = arr[2].toInt()
+						val boxosChecksum = arr[3].toLong()
+						// if(up_data.boxosVersion < version) {
 						var payload = Upgrade()
 						payload.sn = sn
 						payload.boxosChecksum = boxosChecksum
@@ -102,21 +106,21 @@ private fun checkVersion(buf: ByteArray, offset: Int, len: Int): ByteArray {
 						payload.timestamp = timestamp
 						val payload_byte: ByteArray = Packer.encode(mac, payload)
 						return payload_byte
+					// }
 				}
-			}
-		} else{
-			val supervisor_test = jedis.hget("upgrade.prerelease.supervisor", up_data.systemBoard.toString()  + "-" + up_data.lockBoard.toString())
-			if(supervisor_test != null){
-					var url = supervisor_test;
-					val lastIndexOfDot: Int = url.lastIndexOf("/")
-					val fileNameLength: Int = url.length
-					val extension: String = url.substring(lastIndexOfDot+1, fileNameLength-4)
-					val arr = extension.split("-")
-					val systemBoard = arr[0].toInt()
-					val lockBoard = arr[1].toInt()
-					val version = arr[2].toInt()
-					val supervisorChecksum = arr[3].toLong()
-					if(version != up_data.supervisorVersion){
+			} else{
+				val supervisor_test = jedis.hget("upgrade.prerelease.supervisor", up_data.systemBoard.toString()  + "-" + up_data.lockBoard.toString() + "-" + up_data.version.toString())
+				if(supervisor_test != null){
+						var url = supervisor_test;
+						val lastIndexOfDot: Int = url.lastIndexOf("/")
+						val fileNameLength: Int = url.length
+						val extension: String = url.substring(lastIndexOfDot+1, fileNameLength-4)
+						val arr = extension.split("-")
+						val systemBoard = arr[0].toInt()
+						val lockBoard = arr[1].toInt()
+						val version = arr[2].toInt()
+						val supervisorChecksum = arr[3].toLong()
+						// if(version > up_data.supervisorVersion){
 						var payload = Upgrade()
 						payload.sn = sn
 						payload.boxosVersion = up_data.boxosVersion
@@ -130,20 +134,20 @@ private fun checkVersion(buf: ByteArray, offset: Int, len: Int): ByteArray {
 						payload.timestamp = timestamp
 						val payload_byte: ByteArray = Packer.encode(mac, payload)
 						return payload_byte
+						// }
 					}
-				}
-				val boxos_test = jedis.hget("upgrade.prerelease.boxos", up_data.systemBoard.toString()  + "-" + up_data.lockBoard.toString())
-				if(boxos_test!= null){
-				var url_test = boxos_test;
-				val lastIndexOfDot_test: Int = url_test.lastIndexOf("/")
-				val fileNameLength_test: Int = url_test.length
-				val extension_test: String = url_test.substring(lastIndexOfDot_test + 1, fileNameLength_test - 4)
-				val arr_test = extension_test.split("-")
-				val systemBoard_test = arr_test[0].toInt()
-				val lockBoard_test = arr_test[1].toInt()
-				val version_test = arr_test[2].toInt()
-				val boxosChecksum = arr_test[3].toLong()
-				if(version_test != up_data.boxosVersion){
+					val boxos_test = jedis.hget("upgrade.prerelease.boxos", up_data.systemBoard.toString()  + "-" + up_data.lockBoard.toString() + "-" + up_data.version.toString())
+					if(boxos_test!= null){
+					var url_test = boxos_test;
+					val lastIndexOfDot_test: Int = url_test.lastIndexOf("/")
+					val fileNameLength_test: Int = url_test.length
+					val extension_test: String = url_test.substring(lastIndexOfDot_test + 1, fileNameLength_test - 4)
+					val arr_test = extension_test.split("-")
+					val systemBoard_test = arr_test[0].toInt()
+					val lockBoard_test = arr_test[1].toInt()
+					val version_test = arr_test[2].toInt()
+					val boxosChecksum = arr_test[3].toLong()
+					// if(version_test > up_data.boxosVersion){
 					var payload_test = Upgrade()
 					payload_test.sn = sn
 					payload_test.boxosChecksum = boxosChecksum
@@ -157,9 +161,21 @@ private fun checkVersion(buf: ByteArray, offset: Int, len: Int): ByteArray {
 					payload_test.timestamp = timestamp
 					val payload_byte: ByteArray = Packer.encode(mac, payload_test)
 					return payload_byte
+						// }
 					}
 				}
-			}
+			}catch(e:Exception){
+				println(e)
+				val timeZone = TimeZone.getDefault();
+				val zone = timeZone.getOffset(0) // 获取的是相差的毫秒　如8区值为8*60*60*1000 = 28800000
+				var payload = SyncTime()
+				payload.sn = sn
+				payload.version = 0
+				payload.timestamp = timestamp
+				payload.zone = zone
+				val payload_byte: ByteArray = Packer.encode(mac, payload)
+				return payload_byte
+		}
 	}else if(packet.type == CommandType.REGISTER) {
 		val up_data: Register = packet.register
 		val pin: Int = up_data.pin
