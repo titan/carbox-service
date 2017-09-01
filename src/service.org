@@ -1,0 +1,291 @@
+* 基本框架
+
+Box service 是无状态的服务，采用异步方式编写。服务启动后侦听 UDP/8080 端口，处理
+收到的请求，并把相应返回给请求的客户端。
+
+box service 对外依赖两个服务提供数据，一个是 admin api server，另一个是 redis。
+admin api server 用 AsyncHttpClient 通过 http 协议来访问；redis 用 AsyncRedis 来
+访问。这两个部件都是 async 的，要求能做到断开后还能重新连接。为了能做到这一点，
+代码中采用 http_okay 和 redis_connected 这两个 bool 型变量。一旦发现连接断开，就
+设置对应的变量，后续程序发现连接断开，会自动重新连接。
+
+#+begin_src nim :exports code :noweb yes :mkdirp yes :tangle /dev/shm/box-service/src/box_service.nim
+  import asyncdispatch, asyncnet, box_packer, hardware_table, httpclient, json, nativesockets, posix, redis, strutils, sync_time, times, upgrade
+
+  type
+    <<upgrade-tuple>>
+
+  <<parse-upgrade>>
+  <<hexdump>>
+
+  proc prepareAddress(intaddr: uint32, intport: uint16): ptr Sockaddr_in =
+    result = cast[ptr Sockaddr_in](alloc0(sizeof(Sockaddr_in)))
+    result.sin_family = toInt(nativesockets.AF_INET)
+    result.sin_port = nativesockets.htons(intport)
+    result.sin_addr.s_addr = nativesockets.htonl(intaddr)
+
+  proc serve() {.async.} =
+    var
+      name = prepareAddress(INADDR_ANY, 8080)
+      sock = newAsyncNativeSocket(domain = Domain.AF_INET, sockType = SockType.SOCK_DGRAM, protocol = Protocol.IPPROTO_UDP)
+      rcvbuf: ref array[1024, byte] = new(array[1024, byte])
+      sndbuf: ref array[1024, byte] = new(array[1024, byte])
+      slen = sizeof(Sockaddr_in).SockLen
+      saddr = Sockaddr_in()
+      address = newString(128)
+      http_client: AsyncHttpClient = newAsyncHttpClient()
+      http_okay: bool = false
+      redis_client: AsyncRedis
+      redis_connected: bool = false
+
+    discard bindAddr(sock.SocketHandle, cast[ptr SockAddr](name), sizeof(Sockaddr_in).Socklen)
+    echo "server bound to port 8080"
+
+    while true:
+      if not redis_connected:
+        let redis_result = openAsync(host = "cache")
+        yield redis_result
+        if redis_result.failed():
+          redis_connected = false
+        else:
+          redis_connected = true
+          redis_client = redis_result.read()
+      zeroMem(cast[pointer](rcvbuf), 1024)
+      zeroMem(cast[pointer](addr(saddr)), sizeof(Sockaddr_in))
+      let rlen = await sock.recvFromInto(cast[pointer](rcvbuf), 1024, cast[ptr SockAddr](addr(saddr)), addr(slen))
+      discard inet_ntop(posix.AF_INET, cast[pointer](addr saddr.sin_addr), cstring(address), len(address).int32)
+      echo hexdump(@(rcvbuf[]), rlen)
+      var data: PackResult = box_packer.decode(@(rcvbuf[]), 0, rlen)
+      if data != nil:
+        case data.cmd_type:
+          of CommandType.REGISTER:
+            echo "Receive Register from ", address
+            <<register>>
+          of CommandType.DATA:
+            echo "Receive Data from ", address
+            <<data>>
+          else:
+            echo "Receive Unknown from ", address
+
+  asyncCheck serve()
+  runForever()
+#+end_src
+
+* 设备注册
+
+设备在没有配置信息时，会定时给服务发送设备注册命令。设备信息里包括设备的 PIN，服
+务需要把该 PIN 保存到 redis 中，这样管理端可以根据这个 PIN 对设备进行配置。如果
+服务从 admin api server 能够获取到设备的配置信息，就给设备回复 HardwareTable 命
+令。如果没有配置信息，服务就向设备回复 SyncTime 命令。
+
+#+begin_src nim :noweb-ref register
+  let
+    mac = data.mac
+    register = data.register
+    sn = register.sn
+    pin = register.pin
+  if http_okay:
+    let resp = http_client.request(url = "http://adminer:8888/devices/" & $mac, headers = newHttpHeaders([(key: "token", val: "boxservice")]))
+    yield resp
+    if not resp.failed and resp.read.code.is2xx:
+      let jsonstr = resp.read.bodyStream.readAll()
+      yield jsonstr
+      if not jsonstr.failed:
+        let json = parseJson(jsonstr.read)
+        var hardware_table: ref HardwareTable = new(HardwareTable)
+        hardware_table.antenna = cast[int32](json["antenna"].getNum)
+        hardware_table.card_reader = cast[int32](json["card-reader"].getNum)
+        hardware_table.lock_amount = cast[int32](json["lock-amount"].getNum)
+        hardware_table.lock_board = cast[int32](json["lock-board"].getNum)
+        hardware_table.router_board = cast[int32](json["router-board"].getNum)
+        hardware_table.sim_no = cast[int32](json["sim-no"].getNum)
+        hardware_table.system_board = cast[int32](json["system-board"].getNum)
+        hardware_table.wireless = cast[int32](json["wireless"].getNum)
+        var pkt = hardware_table.encode_with_mac(mac)
+        zeroMem(cast[pointer](sndbuf), 1024)
+        for i in 0..(len(pkt) - 1):
+          sndbuf[i] = pkt[i]
+        asyncCheck sendTo(socket = sock, data = cast[pointer](sndbuf), size = len(pkt), saddr = cast[ptr SockAddr](addr(saddr)), saddrLen = slen)
+        echo hexdump(@(sndbuf[]), len(pkt))
+        echo "Send HardwareTable to ", address
+      else:
+        echo "json error: ", jsonstr.errorStackTrace
+        if redis_connected:
+          asyncCheck redis_client.setk("pin." & $pin, $mac)
+        <<sync-time>>
+    else:
+      if resp.errorStackTrace != nil:
+        echo "http client error: ", resp.errorStackTrace
+        http_okay = false
+      else:
+        echo "http client response code: ", resp.read.code
+      if redis_connected:
+        asyncCheck redis_client.setk("pin." & $pin, $mac)
+      <<sync-time>>
+  else:
+    http_client = newAsyncHttpClient()
+    http_okay = true
+    <<sync-time>>
+
+#+end_src
+* 数据上报
+
+设备在正常工作时，会定时给服务器发送 DATA 命令。此时，服务器要检查设备是否是测试
+设备，以及设备的版本信息(包括 supervisor 和 boxos)。测试设备去
+upgrade.prerelease.{supervisor|boxos} 查询版本更新信息。正式设备去
+upgrade.release.{supervisor|boxos} 查询版本更新信息。如果要升级信息，服务给设备
+回复 Upgrade 命令；如果没有，继续回复 SyncTime 命令。
+#+begin_src nim :noweb-ref data
+  let
+    mac = data.mac
+    dat = data.data
+    sn = dat.sn
+    system = dat.system_board
+    lock = dat.lock_board
+    boxos_version = dat.boxos_version
+    supervisor_version = dat.supervisor_version
+
+  if redis_connected:
+    let member_result = redis_client.sismember("testset", $mac)
+    yield member_result
+    if not member_result.failed:
+      let
+        key_prefix = if member_result.read == 1: "uprade.prerelease." else: "upgrade.release."
+        boxos_key = key_prefix & "boxos"
+        supervisor_key = key_prefix & "supervisor"
+        field_prefix = $system & "-" & $lock & "-"
+        boxos_field = field_prefix & $boxos_version
+        supervisor_field = field_prefix & $supervisor_version
+      let supervisor_result = redis_client.hget(supervisor_key, supervisor_field)
+      yield supervisor_result
+      if not supervisor_result.failed:
+        let
+          url = supervisor_result.read
+          upgrade_tuple = parse_upgrade(url)
+        if upgrade_tuple.system > 0:
+          var upgrade = new(Upgrade)
+          upgrade.sn = sn
+          upgrade.version = 0
+          upgrade.timestamp = cast[int64]((epochTime() * 1000).toInt())
+          upgrade.system_board = upgrade_tuple.system
+          upgrade.lock_board = upgrade_tuple.lock
+          upgrade.supervisor_url = url
+          upgrade.supervisor_version = upgrade_tuple.version
+          upgrade.supervisor_checksum = upgrade_tuple.checksum
+          var pkt = upgrade.encode_with_mac(mac)
+          zeroMem(cast[pointer](sndbuf), 1024)
+          for i in 0..(len(pkt) - 1):
+            sndbuf[i] = pkt[i]
+          asyncCheck sendTo(socket = sock, data = cast[pointer](sndbuf), size = len(pkt), saddr = cast[ptr SockAddr](addr(saddr)), saddrLen = slen)
+          echo hexdump(@(sndbuf[]), len(pkt))
+          echo "Send Upgrade(supervisor) to ", address
+          continue
+      else:
+        if supervisor_result.errorStackTrace != nil:
+          echo supervisor_result.error.name, ": ", supervisor_result.error.msg
+          redis_connected = false
+
+      let boxos_result = redis_client.hget(boxos_key, boxos_field)
+      yield boxos_result
+      if not boxos_result.failed:
+        let
+          url = boxos_result.read
+          upgrade_tuple = parse_upgrade(url)
+        if upgrade_tuple.system > 0:
+          var upgrade = new(Upgrade)
+          upgrade.sn = sn
+          upgrade.version = 0
+          upgrade.timestamp = cast[int64]((epochTime() * 1000).toInt())
+          upgrade.system_board = upgrade_tuple.system
+          upgrade.lock_board = upgrade_tuple.lock
+          upgrade.boxos_url = url
+          upgrade.boxos_version = upgrade_tuple.version
+          upgrade.boxos_checksum = upgrade_tuple.checksum
+          var pkt = upgrade.encode_with_mac(mac)
+          zeroMem(cast[pointer](sndbuf), 1024)
+          for i in 0..(len(pkt) - 1):
+            sndbuf[i] = pkt[i]
+          asyncCheck sendTo(socket = sock, data = cast[pointer](sndbuf), size = len(pkt), saddr = cast[ptr SockAddr](addr(saddr)), saddrLen = slen)
+          echo hexdump(@(sndbuf[]), len(pkt))
+          echo "Send Upgrade(boxos) to ", address
+          continue
+      else:
+        if boxos_result.errorStackTrace != nil:
+          echo boxos_result.error.name, ": ", boxos_result.error.msg
+          redis_connected = false
+
+      <<sync-time>>
+    else:
+      if member_result.errorStackTrace != nil:
+        echo member_result.error.name, ": ", member_result.error.msg
+        redis_connected = false
+      <<sync-time>>
+  else:
+    <<sync-time>>
+#+end_src
+* 同步时间
+#+begin_src nim :noweb-ref sync-time
+  var sync_time: ref SyncTime = new(SyncTime)
+  sync_time.sn = sn
+  sync_time.version = 0
+  sync_time.zone = 8 * 60 * 60 * 1000
+  sync_time.timestamp = cast[int64]((epochTime() * 1000).toInt())
+  var pkt = sync_time.encode_with_mac(mac)
+  zeroMem(cast[pointer](sndbuf), 1024)
+  for i in 0..(len(pkt) - 1):
+    sndbuf[i] = pkt[i]
+  asyncCheck sendTo(socket = sock, data = cast[pointer](sndbuf), size = len(pkt), saddr = cast[ptr SockAddr](addr(saddr)), saddrLen = slen)
+  echo hexdump(@(sndbuf[]), len(pkt))
+  echo "Send SyncTime to ", address
+#+end_src
+
+* 支援方法
+
+** 解析升级链接
+
+升级链接大致采用如下格式：
+
+path/system-lock-version-adler32-xxx-xxx.apk
+
+#+begin_src nim :noweb-ref parse-upgrade
+  proc parse_upgrade(url: string): UpgradeTuple =
+    let
+      strarr = url.split(sep = '/')
+      idx = if len(strarr) == 1: 0 else: len(strarr) - 1
+      filename = strarr[idx]
+      arr = if filename.find('.') != -1: filename.split(sep = '.')[0].split(sep = '-') else: filename.split(sep = '-')
+    if len(arr) < 4:
+      result = (system: 0'i32, lock: 0'i32, version: 0'i32, checksum: 0'i64)
+    else:
+      let
+        systemstr = arr[0]
+        lockstr = arr[1]
+        versionstr = arr[2]
+        checksumstr = arr[3]
+      try:
+        var
+          system: int = systemstr.parseInt
+          lock: int = lockstr.parseInt
+          version: int = versionstr.parseInt
+          checksum: int = checksumstr.parseInt
+        result = (system: system.toU32, lock: lock.toU32, version: lock.toU32, checksum: cast[int64](checksum))
+      except:
+        result = (system: 0'i32, lock: 0'i32, version: 0'i32, checksum: 0'i64)
+
+#+end_src
+
+#+begin_src nim :noweb-ref upgrade-tuple
+  UpgradeTuple = tuple[system: int32, lock: int32, version: int32, checksum: int64]
+#+end_src
+
+** hexdump
+
+#+begin_src nim :noweb-ref hexdump
+  proc hexdump(buf: seq[byte], size: int): string =
+    var output = ""
+    for i in 0..(size - 1):
+      output.add("$1 " % (toHex(buf[i])))
+      if i mod 8 == 7:
+        output.add("\n")
+    return output
+#+end_src
