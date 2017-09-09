@@ -64,6 +64,9 @@ admin api server 用 AsyncHttpClient 通过 http 协议来访问；redis 用 Asy
           of CommandType.DATA:
             echo "Receive Data from ", address
             <<data>>
+          of CommandType.LOCK_ERROR:
+            echo "Receive LockError from ", address
+            <<lock-error>>
           else:
             echo "Receive Unknown from ", address
 
@@ -222,6 +225,15 @@ upgrade.release.{supervisor|boxos} 查询版本更新信息。如果要升级信
       <<sync-time>>
   else:
     <<sync-time>>
+#+end_src
+* 错误上报
+开锁错误上报，暂时无处理方案，直接返回同步时间命令。
+#+begin_src nim :noweb-ref lock-error
+  let
+    mac = data.mac
+    error = data.lock_error
+    sn = error.sn
+  <<sync-time>>
 #+end_src
 * 同步时间
 #+begin_src nim :noweb-ref sync-time
