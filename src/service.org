@@ -174,7 +174,7 @@ upgrade.release.{supervisor|boxos} 查询版本更新信息。如果要升级信
           upgrade.lock_board = upgrade_tuple.lock
           upgrade.supervisor_url = url
           upgrade.supervisor_version = upgrade_tuple.version
-          upgrade.supervisor_checksum = upgrade_tuple.checksum
+          #upgrade.supervisor_checksum = upgrade_tuple.checksum
           var pkt = upgrade.encode_with_mac(mac)
           zeroMem(cast[pointer](sndbuf), 1024)
           for i in 0..(len(pkt) - 1):
@@ -203,7 +203,7 @@ upgrade.release.{supervisor|boxos} 查询版本更新信息。如果要升级信
           upgrade.lock_board = upgrade_tuple.lock
           upgrade.boxos_url = url
           upgrade.boxos_version = upgrade_tuple.version
-          upgrade.boxos_checksum = upgrade_tuple.checksum
+          #upgrade.boxos_checksum = upgrade_tuple.checksum
           var pkt = upgrade.encode_with_mac(mac)
           zeroMem(cast[pointer](sndbuf), 1024)
           for i in 0..(len(pkt) - 1):
@@ -257,7 +257,7 @@ upgrade.release.{supervisor|boxos} 查询版本更新信息。如果要升级信
 
 升级链接大致采用如下格式：
 
-path/system-lock-version-adler32-xxx-xxx.apk
+path/system-lock-version-md5-xxx-xxx.apk
 
 #+begin_src nim :noweb-ref parse-upgrade
   proc parse_upgrade(url: string): UpgradeTuple =
@@ -267,27 +267,26 @@ path/system-lock-version-adler32-xxx-xxx.apk
       filename = strarr[idx]
       arr = if filename.find('.') != -1: filename.split(sep = '.')[0].split(sep = '-') else: filename.split(sep = '-')
     if len(arr) < 4:
-      result = (system: 0'i32, lock: 0'i32, version: 0'i32, checksum: 0'i64)
+      result = (system: 0'i32, lock: 0'i32, version: 0'i32, checksum: "")
     else:
       let
         systemstr = arr[0]
         lockstr = arr[1]
         versionstr = arr[2]
-        checksumstr = arr[3]
+        checksum = arr[3]
       try:
         var
           system: int = systemstr.parseInt
           lock: int = lockstr.parseInt
           version: int = versionstr.parseInt
-          checksum: int = checksumstr.parseInt
-        result = (system: system.toU32, lock: lock.toU32, version: lock.toU32, checksum: cast[int64](checksum))
+        result = (system: system.toU32, lock: lock.toU32, version: version.toU32, checksum: checksum)
       except:
-        result = (system: 0'i32, lock: 0'i32, version: 0'i32, checksum: 0'i64)
+        result = (system: 0'i32, lock: 0'i32, version: 0'i32, checksum: "")
 
 #+end_src
 
 #+begin_src nim :noweb-ref upgrade-tuple
-  UpgradeTuple = tuple[system: int32, lock: int32, version: int32, checksum: int64]
+  UpgradeTuple = tuple[system: int32, lock: int32, version: int32, checksum: string]
 #+end_src
 
 ** hexdump
